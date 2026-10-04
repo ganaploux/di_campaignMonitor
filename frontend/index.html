@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Campaign budgets</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b2430; --mute:#6b7685; --line:#e3e7ed; --ok:#1f8a5b; --warn:#c77700; --bad:#c2321f; --accent:#2a5bd7; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12161c; --card:#1a2029; --ink:#e8ecf2; --mute:#8d98a8; --line:#2a323e; --ok:#3ec28a; --warn:#e5a23a; --bad:#ef6a57; --accent:#6c93ff; } }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif }
+  main { max-width:1000px; margin:0 auto; padding:24px 16px 48px }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; margin-bottom:16px }
+  h1 { font-size:22px; margin:0 }
+  .meta { color:var(--mute); font-size:13px }
+  .meta .err { color:var(--bad); font-weight:600 }
+  .controls { display:flex; gap:8px; flex-wrap:wrap }
+  select, button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--ink) }
+  button { cursor:pointer } button:hover { border-color:var(--accent) }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+  .wrap { background:var(--card); border:1px solid var(--line); border-radius:8px; overflow-x:auto }
+  .pager { display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-top:12px; color:var(--mute); font-size:13px }
+  .pager button { padding:5px 10px }
+  .pager span { min-width:120px; text-align:center }
+  table { width:100%; border-collapse:collapse; min-width:640px }
+  th, td { padding:10px 14px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap }
+  th { font-weight:600; color:var(--mute); font-size:13px }
+  tr:last-child td { border-bottom:0 }
+  td.n, th.n { text-align:right; font-variant-numeric:tabular-nums }
+  .bar { height:6px; background:var(--line); border-radius:3px; width:90px; display:inline-block; vertical-align:middle; margin-right:8px; overflow:hidden }
+  .bar i { display:block; height:100%; background:var(--ok) }
+  .bar.warn i { background:var(--warn) } .bar.bad i { background:var(--bad) }
+  .pill { padding:2px 8px; border-radius:10px; font-size:12px; border:1px solid var(--line) }
+  .pill.active { color:var(--ok) } .pill.paused { color:var(--warn) } .pill.completed { color:var(--mute) }
+  .empty { padding:32px; text-align:center; color:var(--mute) }
+  .stage { position:relative }
+  .loading { position:absolute; inset:0; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; border-radius:8px; font-size:14px; background:color-mix(in srgb, var(--card) 85%, transparent) }
+  .loading[hidden] { display:none }
+  .spin { width:28px; height:28px; border:3px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite }
+  @keyframes spin { to { transform:rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation-duration:2.4s } }
+  button:disabled { opacity:.55; cursor:default }
+  h2 { font-size:15px; margin:24px 0 8px }
+  ul { margin:0; padding-left:18px } a { color:var(--accent) }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Campaign budgets</h1>
+      <div id="meta" class="meta">Loading…</div>
+    </div>
+    <div class="controls">
+      <select id="filter" aria-label="Filter by status">
+        <option value="">All statuses</option><option>active</option><option>paused</option><option>completed</option>
+      </select>
+      <select id="usedSort" aria-label="Sort by used">
+        <option value="">Sort by Used: default</option>
+        <option value="asc">Used: low to high</option>
+        <option value="desc">Used: high to low</option>
+      </select>
+      <button id="next">Advance one day</button>
+      <button id="reset">Reset campaigns</button>
+    </div>
+  </header>
+  <div class="stage">
+  <div class="wrap"><table>
+    <thead><tr><th>Name</th><th>Advertiser</th><th class="n">Budget</th><th class="n">Spend</th><th>Used</th><th>Status</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table><div id="empty" class="empty" hidden>No campaigns match this filter.</div></div>
+  <div class="pager" aria-label="Campaign pagination">
+    <button id="prevPage" type="button">Previous</button>
+    <span id="pageInfo">Page 1</span>
+    <button id="nextPage" type="button">Next</button>
+  </div>
+  <div id="loading" class="loading" role="status" aria-live="polite" hidden><div class="spin"></div><div id="loadingText"></div></div>
+  </div>
+  <h2>Issues created this session</h2>
+  <ul id="alerts"><li class="meta">None yet.</li></ul>
+</main>
+<script src="config.js"></script>
+<script>
+const API = ((window.CONFIG && window.CONFIG.API_BASE_URL) || "").replace(/\/+$/, "");
+const $ = (id) => document.getElementById(id);
+const usd = (n) => Number.isFinite(n) ? n.toLocaleString("en-US", { style:"currency", currency:"USD", maximumFractionDigits:0 }) : "n/a";
+const esc = (s) => String(s ?? "n/a").replace(/[&<>\"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const PAGE_SIZE = 10;
+let data = null;
+let busy = false;
+let currentPage = 1;
+let backendError = false;
+
+function getUsedSortOrder() {
+  const value = $("usedSort").value;
+  if (!value) return 0;
+  return value === "asc" ? 1 : -1;
+}
+
+function getFilteredCampaigns() {
+  if (!data || !Array.isArray(data.campaigns)) return [];
+  const status = $("filter").value;
+  const sort = $("usedSort").value;
+  const list = data.campaigns.filter((c) => !status || c.status === status);
+  if (!sort) return list;
+  const dir = sort === "asc" ? 1 : -1;
+  return [...list].sort((a, b) => {
+    const pa = (a && a.pct == null) ? Number.NEGATIVE_INFINITY : Number(a?.pct ?? 0);
+    const pb = (b && b.pct == null) ? Number.NEGATIVE_INFINITY : Number(b?.pct ?? 0);
+    return (pa - pb) * dir;
+  });
+}
+
+// Status line. The "updated" timestamp turns red when the data on screen is stale:
+// either the backend is unreachable (backendError) or it can't reach the campaign API (data.lastError).
+function renderMeta() {
+  const m = $("meta");
+  if (!data) { m.textContent = "Loading…"; return; }
+  const last = data.lastPoll ? new Date(data.lastPoll).toLocaleTimeString() : "never";
+  const stale = backendError || data.lastError;
+  m.className = "meta";
+  m.textContent = `${(data.campaigns || []).length} campaigns · updated `;
+  const t = document.createElement("span");
+  t.textContent = last;
+  if (stale) { t.className = "err"; t.title = backendError ? "Backend unreachable: showing last good data" : "Campaign API failing: showing last good data"; }
+  m.append(t, ` · refreshes every ${(data.intervalMs ?? 10000) / 1000}s · session ${data.sessionId || "?"}`);
+}
+
+function render() {
+  if (!data) return;
+  const filtered = getFilteredCampaigns();
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  currentPage = Math.min(currentPage, totalPages);
+  const sliceStart = (currentPage - 1) * PAGE_SIZE;
+  const pageItems = filtered.slice(sliceStart, sliceStart + PAGE_SIZE);
+
+  $("empty").hidden = pageItems.length > 0;
+  $("rows").innerHTML = pageItems.map((c) => {
+    const p = (c && c.pct == null) ? null : Number(c?.pct ?? 0);
+    const cls = p == null ? "" : p > (data.threshold ?? 0.9) ? "bad" : p > (data.threshold ?? 0.9) - 0.15 ? "warn" : "";
+    return `<tr data-campaign-id="${esc(c?.id)}"><td>${esc(c?.name)}</td><td>${esc(c?.advertiser)}</td>
+      <td class="n">${usd(c?.budget)}</td><td class="n">${usd(c?.spend)}</td>
+      <td><span class="bar ${cls}"><i style="width:${Math.min(100, (p || 0) * 100)}%"></i></span>${p == null ? "n/a" : (p * 100).toFixed(1) + "%"}</td>
+      <td><span class="pill ${esc(c?.status)}">${esc(c?.status)}</span></td></tr>`;
+  }).join("");
+
+  const pageLabel = filtered.length ? `Page ${currentPage} of ${totalPages}` : "No results";
+  $("pageInfo").textContent = pageLabel;
+  $("prevPage").disabled = currentPage <= 1 || filtered.length === 0;
+  $("nextPage").disabled = currentPage >= totalPages || filtered.length === 0;
+
+  renderMeta();
+  const alerts = data.alerts || [];
+  $("alerts").innerHTML = alerts.length
+    ? alerts.map((a) => `<li><a href="${esc(a?.url)}" target="_blank" rel="noopener">${esc(a?.name)}</a> <span class="meta">${a?.at ? new Date(a.at).toLocaleTimeString() : ""}</span></li>`).join("")
+    : '<li class="meta">None yet.</li>';
+}
+
+async function load() {
+  if (busy) return;
+  try { 
+    const response = await fetch(API + "/api/campaigns");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const d = await response.json();
+    if (!busy && d && typeof d === "object") {
+      backendError = false;
+      data = d;
+      render();
+    }
+  }
+  catch (e) {
+    console.warn("Failed to load campaigns", e);
+    // Keep the last good data on screen, but say it's stale.
+    backendError = true;
+    renderMeta();
+  }
+}
+$("filter").onchange = () => { currentPage = 1; render(); };
+$("usedSort").onchange = () => { currentPage = 1; render(); };
+$("prevPage").onclick = () => { if (currentPage > 1) { currentPage -= 1; render(); } };
+$("nextPage").onclick = () => { const filtered = getFilteredCampaigns(); const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)); if (currentPage < totalPages) { currentPage += 1; render(); } };
+function setBusy(on, text) {
+  busy = on;
+  const loading = $("loading");
+  const loadingText = $("loadingText");
+  loading.hidden = !on;
+  loadingText.textContent = text || "Loading…";
+  $("rows").setAttribute("aria-busy", on);
+  $("next").disabled = on;
+  $("reset").disabled = on;
+  $("filter").disabled = on;
+  $("usedSort").disabled = on;
+  $("prevPage").disabled = on || currentPage <= 1;
+  $("nextPage").disabled = on || currentPage >= Math.max(1, Math.ceil(getFilteredCampaigns().length / PAGE_SIZE));
+  if (on) {
+    requestAnimationFrame(() => {
+      loading.hidden = false;
+      loadingText.textContent = text || "Loading…";
+    });
+  }
+}
+
+// Runs a POST action, shows the loading overlay, then renders the fresh data the server returns.
+async function run(url, loadingText, failPrefix) {
+  setBusy(true, loadingText);
+  try {
+    const [r] = await Promise.all([
+      fetch(API + url, { method: "POST", headers: { "X-Requested-With": "campaign-ui" } }),
+      new Promise((ok) => setTimeout(ok, 400))
+    ]);
+    let j;
+    try {
+      j = await r.json();
+    } catch (parseErr) {
+      throw new Error(`Invalid response: ${parseErr.message}`);
+    }
+    if (!r.ok) throw new Error((j && j.error) || `HTTP ${r.status}`);
+    if (!j || typeof j !== "object") throw new Error("Expected JSON object");
+    backendError = false;
+    data = j;
+  } catch (e) {
+    alert(failPrefix + ": " + e.message);
+  }
+  finally { 
+    setBusy(false); 
+    render(); 
+  }
+}
+
+$("next").onclick = () => run("/api/next-day", "Advancing one day and refreshing campaigns…", "Could not advance the day");
+$("reset").onclick = () => {
+  if (!confirm("Restart the campaign API container? Campaign data goes back to day 0.")) return;
+  run("/api/reset", "Restarting the campaign API…", "Reset failed");
+};
+load(); setInterval(load, 5000);
+</script>
+</body>
+</html>
